@@ -18,17 +18,25 @@ class ActorCritic(nn.Module):
         # TODO: Build the critic network
         # Hint: 2-layer MLP that maps state_dim -> hidden_dim (with ReLU) -> 1 scalar value
         # Use nn.Sequential with nn.Linear and nn.ReLU layers
-        self.critic = None  # TODO
+        self.critic = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
 
         # TODO: Build the actor network
         # Hint: 2-layer MLP that maps state_dim -> hidden_dim (with ReLU) -> action_dim (mean of policy)
         # Use nn.Sequential with nn.Linear and nn.ReLU layers
-        self.actor = None  # TODO
+        self.actor = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim),
+        )
 
         # TODO: Create a learnable log standard deviation parameter
         # Hint: nn.Parameter of shape (1, action_dim), initialized to zeros
         # This represents log(σ) for the Gaussian policy — shared across all states
-        self.log_std = None  # TODO
+        self.log_std = nn.Parameter(torch.zeros(1, action_dim))
 
         # Apply weight initialization to all layers
         self.apply(self._init_weights)
@@ -90,4 +98,6 @@ class ActorCritic(nn.Module):
         #   - Initialize biases to constant 0.0
         # Hint: nn.init.orthogonal_(m.weight, gain=1.0)
         #        nn.init.constant_(m.bias, 0.0)
-        pass  # TODO
+        if isinstance(m, nn.Linear):
+            nn.init.orthogonal_(m.weight, gain = 1.0)
+            nn.init.constant_(m.bias, 0)

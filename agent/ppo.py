@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 from torch.utils.data import TensorDataset, DataLoader
-from .actor_critic_todo import ActorCritic
+from .actor_critic import ActorCritic
 
 EPS = 1e-6
 
@@ -30,16 +30,12 @@ class PPO:
         self.ent_coef = ent_coef
         self.vf_coef = vf_coef
 
-        # TODO: Create the ActorCritic policy network
-        # Hint: ActorCritic takes (state_dim, action_dim) from env.observation_space and env.action_space
-        #       state_dim = env.observation_space.shape[0]
-        #       action_dim = env.action_space.shape[0]
-        self.policy = None  # TODO
+        # Create the ActorCritic policy network
+        self.policy = ActorCritic(env.observation_space.shape[0], env.action_space.shape[0])
 
-        # TODO: Create the Adam optimizer for the policy parameters
-        # Hint: optim.Adam(self.policy.parameters(), lr=lr, eps=1e-5)
-        #       eps=1e-5 improves numerical stability for RL
-        self.optimizer = None  # TODO
+        # Create the Adam optimizer for the policy parameters
+        # eps=1e-5 improves numerical stability for RL
+        self.optimizer = optim.Adam(self.policy.parameters(), lr=lr, eps=1e-5)
     
     def compute_gae(self, rewards, values, dones):
         """
@@ -62,7 +58,7 @@ class PPO:
         advantages = []
         gae = 0
 
-        # TODO: Loop backwards through timesteps to compute GAE
+        # Loop backwards through timesteps to compute GAE
         #
         # For each timestep t (from T-1 down to 0):
         #   1. If dones[t] is True, next_value = 0 (terminal state has no future value)
@@ -71,21 +67,25 @@ class PPO:
         #   3. Accumulate GAE: gae = δ_t + γ * λ * (1 - done_t) * gae
         #      The (1 - done_t) term resets GAE at episode boundaries
         #   4. Insert gae at position 0 of advantages list (since we iterate backwards)
-        #
-        # Hint: Use reversed(range(len(rewards))) to loop backwards
-        # Hint: advantages.insert(0, gae) to prepend
-        pass  # TODO: implement the loop
+
+        for t in reversed(range(len(rewards))):
+            if dones[t]:
+                next_value = 0
+            else:
+                next_value = values[t + 1]
+
+            error = rewards[t] + self.gamma * next_value - values[t]
+            gae = error + self.gamma * self.gae_lambda * (1-dones[t]) * gae
+            advantages.insert(0, gae)
 
         advantages = np.array(advantages, dtype=np.float32)
         values_arr = np.array(values[:-1], dtype=np.float32)
 
-        # TODO: Compute returns from advantages
-        # Hint: returns = advantages + values_arr  (R_t = A_t + V(s_t))
-        returns = None  # TODO
+        # Compute returns from advantages
+        returns = advantages + values_arr
 
-        # TODO: Normalize advantages for stable training
-        # Hint: advantages = (advantages - mean) / (std + 1e-8)
-        pass  # TODO
+        # Normalize advantages for stable training
+        advantages = (advantages - np.mean(advantages))/(np.std(advantages) + 1e-8)
 
         return advantages, returns 
     
@@ -119,35 +119,39 @@ class PPO:
         # Step 3: Collect n_steps of experience
         for step in range(n_steps): 
 
-            # TODO: Convert state (numpy) to a PyTorch tensor and add batch dimension
-            # Hint: torch.FloatTensor(state).unsqueeze(0) gives shape (1, obs_dim)
-            state_tensor = None  # TODO
+            # Convert state (numpy) to a PyTorch tensor and add batch dimension
+            state_tensor = torch.FloatTensor(state).unsqueeze(0)
 
-            # TODO: Get action, log_prob, and value from the policy (no gradient needed!)
-            # Hint: Wrap in `with torch.no_grad():` since we're just collecting data
-            #       action, log_prob, value = self.policy.get_action_and_log_prob_and_value(state_tensor)
-            #       Then convert: action -> numpy [0], log_prob -> scalar item(), value -> numpy [0,0]
-            action = None    # TODO
-            log_prob = None  # TODO
-            value = None     # TODO
-            
-            # TODO: Take the action in the environment
-            # Hint: next_state, reward, done, truncated, info = self.env.step(action)
-            next_state, reward, done, truncated, _ = None  # TODO
+            # Get action, log_prob, and value from the policy (no gradient needed!)
+            with torch.no_grad():
+                action, log_prob, value = self.policy.get_action_and_log_prob_and_value(state_tensor)
 
-            # TODO: Store this transition in the lists
-            # Append: state, action, log_prob, reward, value, (done or truncated)
-            pass  # TODO
+                action = action.numpy()[0]
+                log_prob = log_prob.item()
+                value = value.numpy()[0, 0]
+            
+            # Take the action in the environment
+            next_state, reward, done, truncated, _ = self.env.step(action)
 
-            # TODO: Update state; if episode ended (done or truncated), reset the environment
-            # Hint: state = next_state; if done or truncated: state, _ = self.env.reset()
-            pass  # TODO
-            
-        # TODO: Get final value estimate for the last state (needed for GAE bootstrap)
-        # Hint: Same pattern as above — convert state to tensor, get value with no_grad
-        #       Append this final value to the values list
-        pass  # TODO
-            
+            # Store this transition in the lists
+            states.append(state)
+            actions.append(action)
+            log_probs.append(log_prob)
+            rewards.append(reward)
+            values.append(value)
+            dones.append(done or truncated)
+
+            # Update state; if episode ended (done or truncated), reset the environment
+            state = next_state
+            if done or truncated:
+                state, _ = self.env.reset()
+        
+        # Get final value estimate for the last state (needed for GAE bootstrap)
+        state_tensor = torch.FloatTensor(state).unsqueeze(0)
+        with torch.no_grad():
+            _, _, last_value = self.policy.get_action_and_log_prob_and_value(state_tensor)
+        values.append(last_value.item())
+
         return {
             'states': np.array(states, dtype=np.float32),
             'actions': np.array(actions, dtype=np.float32),
@@ -201,38 +205,30 @@ class PPO:
                 pre_tanh = torch.atanh(a_clamped)
                 batch_log_probs = (dist.log_prob(pre_tanh) - torch.log(1 - a_clamped.pow(2) + EPS)).sum(dim=-1)
 
-                # TODO: Compute entropy bonus to encourage exploration
-                # Hint: entropy = dist.entropy().sum(dim=-1).mean()
-                entropy = None  # TODO
+                # Compute entropy bonus to encourage exploration
+                entropy = dist.entropy().sum(dim=-1).mean()
                 
-                # TODO: Compute the probability ratio r(θ) = π_new(a|s) / π_old(a|s)
-                # In log space: log r(θ) = log π_new - log π_old
-                # Then: r(θ) = exp(log r(θ))
-                # Hint: ratio = torch.exp(batch_log_probs - batch_old_lp)
-                ratio = None  # TODO
+                # Compute the probability ratio r(θ) = π_new(a|s) / π_old(a|s)
+                ratio = torch.exp(batch_log_probs - batch_old_lp)
 
-                # TODO: Compute the clipped surrogate objective
-                # surr1 = ratio * advantages (unclipped)
-                # surr2 = clip(ratio, 1-ε, 1+ε) * advantages (clipped)
-                # policy_loss = -min(surr1, surr2).mean()  (negative because we maximize)
-                # Hint: Use torch.clamp(ratio, 1 - self.clip_range, 1 + self.clip_range)
-                policy_loss = None  # TODO
+                # Compute the clipped surrogate objective
+                surr1 = ratio * batch_adv
+                surr2 = torch.clamp(ratio, 1 - self.clip_range, 1 + self.clip_range) * batch_adv
+                policy_loss = -torch.min(surr1, surr2).mean()
                 
-                # TODO: Compute value function loss (MSE between predicted value and returns)
-                # Hint: value_loss = 0.5 * ((batch_values.squeeze(-1) - batch_ret) ** 2).mean()
-                value_loss = None  # TODO
+                #  Compute value function loss (MSE between predicted value and returns)
+                value_loss = 0.5 * ((batch_values.squeeze(-1) - batch_ret) ** 2).mean()
 
-                # TODO: Combine into total loss
-                # loss = policy_loss + vf_coef * value_loss - ent_coef * entropy
+                # Combine into total loss
                 # Note: entropy is SUBTRACTED because we want to MAXIMIZE entropy (more exploration)
-                loss = None  # TODO
+                loss = policy_loss + self.vf_coef * value_loss - self.ent_coef * entropy
 
-                # TODO: Backpropagation and optimizer step
-                # 1. self.optimizer.zero_grad()
-                # 2. loss.backward()
-                # 3. Clip gradients: torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
-                # 4. self.optimizer.step()
-                pass  # TODO
+                # Backpropagation and optimizer step
+                self.optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), max_norm=0.5)
+                self.optimizer.step()
+
 
                 policy_losses.append(policy_loss.item())
                 value_losses.append(value_loss.item())
@@ -266,25 +262,33 @@ class PPO:
         # Main training loop
         for iteration in range(n_iterations): 
 
-            # TODO: Step 1 — Collect trajectories using current policy
+            # Step 1 — Collect trajectories using current policy
             # Hint: trajectories = self.collect_trajectories(steps_per_iter)
-            trajectories = None  # TODO
+            trajectories = self.collect_trajectories(steps_per_iter)
 
-            # TODO: Step 2 — Compute GAE advantages and returns
+            # Step 2 — Compute GAE advantages and returns
             # Hint: advantages, returns = self.compute_gae(
             #           trajectories['rewards'], trajectories['values'], trajectories['dones'])
-            advantages, returns = None, None  # TODO
 
-            # TODO: Step 3 — Update the policy using collected data
-            # Hint: update_stats = self.update_policy(
-            #           trajectories['states'], trajectories['actions'],
-            #           trajectories['log_probs'], advantages, returns)
-            update_stats = None  # TODO
+            advantages, returns = self.compute_gae(
+                trajectories['rewards'], trajectories['values'], trajectories['dones'])
 
-            # TODO: Step 4 — Log training statistics
-            # Compute mean_reward = np.mean(trajectories['rewards'])
-            # Append iteration, mean_reward, policy_loss, value_loss, entropy to training_stats
-            pass  # TODO
+            # Step 3 — Update the policy using collected data
+            update_stats = self.update_policy(
+            trajectories['states'], trajectories['actions'],
+            trajectories['log_probs'], advantages, returns)
+
+            # Step 4 — Log training statistics
+            if trajectories['rewards']:
+                mean_reward = np.mean(trajectories['rewards'])
+            else:
+                mean_reward = float("nan")
+
+            training_stats['iterations'].append(iteration + 1)
+            training_stats['mean_rewards'].append(mean_reward)
+            training_stats['policy_losses'].append(update_stats['policy_loss'])
+            training_stats['value_losses'].append(update_stats['value_loss'])
+            training_stats['entropies'].append(update_stats['entropy'])
 
             # Print training progress every 10 iterations
             if (iteration + 1) % 10 == 0:
