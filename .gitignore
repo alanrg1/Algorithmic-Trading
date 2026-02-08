@@ -1,0 +1,14 @@
+.DS_Store
+.idea/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+envs/__pycache__/
+__pycache__/
+*.egg-info/
+pip-wheel-metadata/
+*.ipynb_checkpoints
+data/
