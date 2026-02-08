@@ -1,2 +1,2 @@
-from .actor_critic_todo import ActorCritic
-from .ppo_todo import PPO
+from .actor_critic import ActorCritic
+from .ppo import PPO
