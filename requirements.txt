@@ -39,3 +39,6 @@ urllib3==2.6.3
 websockets==16.0
 yfinance==1.1.0
 gymnasium==1.2.3
+python-dotenv
+alpaca-trade-api
+jupyter
