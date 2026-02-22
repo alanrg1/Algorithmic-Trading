@@ -1,6 +1,4 @@
 """
-LEARNING TODO: Alpaca REST helpers (alpaca_utils_todo.py)
-
 This module bridges the trained PPO policy and the live Alpaca broker.
 Two key ideas:
 
@@ -51,16 +49,15 @@ def prepare_features(stock_data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFr
 
 
 # ---------------------------------------------------------------------------
-# TODO 1 — Build the observation vector
+# Build the observation vector
 # ---------------------------------------------------------------------------
+
 def build_observation(stock_data: Dict[str, pd.DataFrame],
                       balance: float, shares_held: Dict[str, int],
                       net_worth: float, max_net_worth: float,
                       current_step: int, max_steps: int,
                       initial_balance: float = 100000) -> np.ndarray:
     """
-    TODO: Build the observation vector that the PPO policy expects.
-
     WHY THIS MATTERS:
     The policy is a neural network that was trained on vectors of a specific
     shape and layout. If you change the order, leave something out, or forget
@@ -87,13 +84,29 @@ def build_observation(stock_data: Dict[str, pd.DataFrame],
 
     Returns: np.ndarray of shape (obs_dim,) with dtype float32.
     """
-    # TODO: implement — refer to naive_env._get_observation() for the layout
-    raise NotImplementedError("build_observation")
+    obs = []
 
+    for ticker in TRAINING_TICKERS:
+        latest_features = stock_data[ticker].iloc[-1].values
+        obs.extend(latest_features)
+
+    obs.append(balance/initial_balance)
+
+    for ticker in TRAINING_TICKERS:
+        obs.append(shares_held.get(ticker, 0) / 1000.0)
+
+    obs.append(net_worth/initial_balance)
+    obs.append(max_net_worth/initial_balance)
+    obs.append(current_step/max(max_steps, 1))
+    obs_array = np.array(obs, dtype=np.float32)
+    obs_array = np.nan_to_num(obs_array)
+    obs_array = np.clip(obs_array, -10, 10)
+    return obs_array
 
 # ---------------------------------------------------------------------------
 # This one is just a REST call — kept as-is.
 # ---------------------------------------------------------------------------
+
 def get_current_positions(api) -> Dict[str, int]:
     """
     Call Alpaca REST API to get current holdings.
@@ -111,14 +124,13 @@ def get_current_positions(api) -> Dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
-# TODO 2 — Turn policy actions into real orders
+# Turn policy actions into real orders
 # ---------------------------------------------------------------------------
+
 def place_orders_from_actions(api, actions: np.ndarray, tickers: List[str],
                               portfolio_value: float, current_positions: Dict[str, int],
                               min_trade_value: float = 100) -> List[Dict]:
     """
-    TODO: Convert the policy's continuous actions into market orders.
-
     WHY THIS MATTERS:
     The policy outputs one float per ticker in [-1, 1]. Positive means
     "I want to buy", negative means "I want to sell", and the magnitude
@@ -153,9 +165,65 @@ def place_orders_from_actions(api, actions: np.ndarray, tickers: List[str],
 
     Returns: list of order dicts.
     """
-    # TODO: implement — loop over tickers, compute shares, submit orders
-    raise NotImplementedError("place_orders_from_actions")
+    executed_orders = []
+    max_spend_per_ticker = portfolio_value/len(tickers)
 
+    for i, ticker in enumerate(tickers):
+        action = float(actions[i])
+
+        if abs(action) < 0.01:
+            continue
+
+        try:
+            latest_trade = api.get_latest_trade(ticker, feed='iex')
+            current_price = float(latest_trade.price)
+        except Exception as e:
+            print(f"Error fetching trade price for {ticker}: {e}")
+            continue
+
+        if current_price <= 0:
+            continue
+
+        if action > 0:
+            spend_amount = max_spend_per_ticker * action
+
+            if spend_amount < min_trade_value:
+                continue
+
+            shares_to_buy = int(spend_amount/current_price)
+
+            if shares_to_buy > 0:
+                try:
+                    order = api.submit_order(symbol=ticker, qty=shares_to_buy, side='buy', type='market', time_in_force='day')
+                    executed_orders.append({'ticker': ticker, 'side': 'buy', 'qty': shares_to_buy, 'price': current_price, 'order_id': order.id})
+                except Exception as e:
+                    print(f"Error placing buy order for {ticker}: {e}")
+
+        elif action < 0:
+            shares_held = current_positions.get(ticker, 0)
+
+            if shares_held <= 0:
+                continue
+
+            shares_to_sell = int(shares_held * abs(action))
+
+            if shares_to_sell > 0:
+                sell_value = shares_to_sell * current_price
+
+                if sell_value < min_trade_value:
+                    continue
+
+                try:
+                    order = api.submit_order(symbol=ticker, qty=shares_to_sell, side='sell', type='market', time_in_force='day')
+                    executed_orders.append({'ticker': ticker, 'side': 'sell', 'qty': shares_to_sell, 'price': current_price,'order_id': order.id})
+                except Exception as e:
+                    print(f"Error placing sell order for {ticker}: {e}")
+
+    return executed_orders
+
+# ---------------------------------------------------------------------------
+# Performance metrics
+# ---------------------------------------------------------------------------
 
 def calculate_portfolio_metrics(portfolio_values: List[float],
                                  returns: List[float]) -> Dict[str, float]:

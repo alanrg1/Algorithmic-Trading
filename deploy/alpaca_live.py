@@ -1,6 +1,4 @@
 """
-LEARNING TODO: Live trading entry point (alpaca_live_todo.py)
-
 This is the main script that ties everything together:
   (1) IEX WebSocket streams live minute bars in a background thread.
   (2) Every N minutes, we read the aggregated 15-min data, build an
@@ -21,23 +19,28 @@ from datetime import datetime
 import numpy as np
 import torch
 
+# Add parent directory so we can import agent/ and src/
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dotenv import load_dotenv
 import alpaca_trade_api as tradeapi
 
 from agent.actor_critic import ActorCritic
-from alpaca_utils_todo import (
+from alpaca_utils import (
     TRAINING_TICKERS,
     prepare_features,
     build_observation,
     place_orders_from_actions,
     get_current_positions,
 )
+
+# Make sure to install alpaca-py package: pip install alpaca-py
 from alpaca_websocket import IEXStream15MinFetcher
 
+# Load .env file
 load_dotenv(Path(__file__).parent / '.env')
 
+# Risk limits: stop trading if we hit these limits
 RISK_PARAMS = {
     'max_position_size': 0.15,   # Max 15% per stock
     'daily_loss_limit': 0.05,    # Stop if down 5% in a day
@@ -46,7 +49,7 @@ RISK_PARAMS = {
 }
 DEFAULT_MODEL_PATH = str(Path(__file__).parent.parent / 'models' / 'ppo_trading.pt')
 
-
+# Trained PPO policy model
 class AlpacaPPOTrader:
     """Live trading manager."""
 
@@ -140,6 +143,7 @@ class AlpacaPPOTrader:
 
         return True
 
+    # Trading cycle: data -> observation -> action -> orders
     def fetch_latest_data(self):
         """Read latest 15-min bars from the WebSocket fetcher, then add features."""
         raw = self._iex_fetcher.get_latest_15min_data()
@@ -152,12 +156,10 @@ class AlpacaPPOTrader:
         return prepare_features(raw)
 
     # ==================================================================
-    # TODO 1 — One trading cycle
+    # One trading cycle
     # ==================================================================
     def execute_trade(self):
         """
-        TODO: Run one complete trading cycle.
-
         Think of it as a pipeline:
 
             safety check → data → observation → action → orders
@@ -187,16 +189,57 @@ class AlpacaPPOTrader:
 
         Returns: True to keep trading, False to stop (risk limit hit).
         """
-        # TODO: implement
-        raise NotImplementedError("execute_trade")
+        if not self.check_risk_limits():
+            return False
+
+        try:
+            account = self.api.get_account()
+            portfolio_value = float(account.portfolio_value)
+            balance = float(account.cash)
+        except Exception as e:
+            print(f"Error fetching account info: {e}")
+            return True
+
+        stock_data = self.fetch_latest_data()
+
+        if stock_data is None:
+            return True
+
+        current_positions = get_current_positions(self.api)
+        max_steps = 1490
+
+        try:
+            obs = build_observation(stock_data=stock_data, balance=balance, shares_held=current_positions,
+                                    net_worth=portfolio_value, max_net_worth=portfolio_value,
+                                    current_step=self.trade_step, max_steps=max_steps)
+        except Exception as e:
+            print(f"Error building observations vector: {e}")
+            return True
+
+        action = self.predict(obs)
+
+        print(f"\n--- Trade Step {self.trade_step} | {datetime.now().strftime('%H:%M:%S')} ---")
+        print(f"Portfolio Value: ${portfolio_value:,.2f}")
+
+        executed_orders = place_orders_from_actions(api=self.api, actions=action, tickers=TRAINING_TICKERS, portfolio_value=portfolio_value, current_positions=current_positions)
+
+        if executed_orders:
+            for order in executed_orders:
+                print(f"[{order['side'].upper()}] {order['qty']} shares of {order['ticker']} @ ${order['price']:.2f}")
+        else:
+             print("No trades executed.")
+
+        self.portfolio_history.append((datetime.now(), portfolio_value))
+        self.trade_step += 1
+
+        return True
 
     # ==================================================================
-    # TODO 2 — The main trading loop
+    # The main trading loop
     # ==================================================================
+
     def run(self, trade_frequency_minutes: int):
         """
-        TODO: The main loop that keeps the trader alive.
-
         This function should run indefinitely (until interrupted or a risk
         limit is hit). 
 
@@ -232,8 +275,86 @@ class AlpacaPPOTrader:
           - float('inf') is a handy "first iteration" sentinel for elapsed.
           - Wrap the loop in try/except/finally for robust cleanup.
         """
-        # TODO: implement
-        raise NotImplementedError("run")
+
+        # Start gathering data before entering the loop
+        print("Starting live IEX WebSocket fetcher...")
+        self._iex_fetcher.start()
+
+        self.running = True
+
+        # Set to the minimum possible date so the bot immediately triggers
+        # a trade execution on its very first loop (if the market is open).
+        last_trade_time = datetime.min
+        last_date_checked = datetime.now().date()
+
+        try:
+            while self.running:
+                now = datetime.now()
+
+                # a) NEW DAY?
+                # Reset the daily risk limits if the calendar date has changed
+                if now.date() > last_date_checked:
+                    print(f"\n--- New Trading Day: {now.date()} ---")
+                    current_value = self.get_portfolio_value()
+                    if current_value is not None:
+                        self.daily_start_value = current_value
+                    last_date_checked = now.date()
+
+                # b) MARKET OPEN?
+                if not self.is_market_open():
+                    next_open, _ = self.get_market_hours()
+                    if next_open:
+                        # Calculate exactly how many seconds until the opening bell
+                        sleep_seconds = (next_open.timestamp() - now.timestamp())
+                        if sleep_seconds > 0:
+                            print(
+                                f"Market closed. Sleeping until next open at {next_open.strftime('%Y-%m-%d %H:%M:%S')}...")
+                            time.sleep(sleep_seconds)
+                            continue  # Wake up and restart the loop check
+                    else:
+                        print("Market closed. Unable to determine next open time. Checking again in 60s...")
+                        time.sleep(60)
+                        continue
+
+                # c) TIME TO TRADE?
+                # Calculate the elapsed time in minutes since the last successful trade
+                elapsed_minutes = (now - last_trade_time).total_seconds() / 60.0
+
+                if elapsed_minutes >= trade_frequency_minutes:
+                    print(
+                        f"\nInitiating {trade_frequency_minutes}-minute trade cycle (Elapsed: {elapsed_minutes:.1f}m)...")
+
+                    # Run the full pipeline (safety check -> observation -> model -> orders)
+                    keep_trading = self.execute_trade()
+                    last_trade_time = datetime.now()
+
+                    # If execute_trade returned False (e.g., drawdown limit breached), kill the loop
+                    if not keep_trading:
+                        print("Emergency Stop: Risk limit breached. Halting trading bot.")
+                        self.running = False
+                        break
+                    cv = self.get_portfolio_value()
+
+                    # Ensure all baseline values exist before doing math to avoid division-by-zero errors
+                    if self.initial_value and cv and self.daily_start_value:
+                        tot = (cv - self.initial_value) / self.initial_value * 100
+                        day = (cv - self.daily_start_value) / self.daily_start_value * 100
+                        print(f"Total return: {tot:+.2f}%  |  Today's return: {day:+.2f}%")
+                else:
+                    # Sleep briefly to avoid pegging the CPU while waiting for the next interval
+                    time.sleep(30)
+
+        except KeyboardInterrupt:
+            # Graceful shutdown if you hit Ctrl+C in the terminal
+            print("\nTrader interrupted manually by user (Ctrl+C).")
+        except Exception as e:
+            print(f"\nFatal error in main loop: {e}")
+        finally:
+            # CLEANUP: This block is guaranteed to run, preventing background zombie threads
+            print("\nShutting down trader. Stopping WebSocket...")
+            self.running = False
+            self._iex_fetcher.stop()
+            self._print_summary()
 
     def _print_summary(self):
         """Print final performance stats."""
