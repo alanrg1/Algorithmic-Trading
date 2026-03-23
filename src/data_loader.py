@@ -1,6 +1,6 @@
-import yfinance as yf
 import pandas as pd
 import numpy as np
+import yfinance as yf
 
 def get_data(tickers, start='2014-01-01', end='2026-01-01'):
     stock_data = {}

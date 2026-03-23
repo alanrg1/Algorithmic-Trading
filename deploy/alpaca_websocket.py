@@ -36,6 +36,11 @@ import pandas as pd
 
 from alpaca.data.enums import DataFeed
 from alpaca.data.live.stock import StockDataStream
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+from datetime import datetime, timedelta
+
 
 from alpaca_utils import TRAINING_TICKERS
 
@@ -57,7 +62,6 @@ def _bar_to_tuple(bar) -> tuple:
         o, h, l, c = float(bar["o"]), float(bar["h"]), float(bar["l"]), float(bar["c"])
         v = int(bar.get("v", 0))
     return (ts, o, h, l, c, v)
-
 
 def _bucket_15min(ts: datetime) -> datetime:
     """
@@ -88,6 +92,41 @@ class IEXStream15MinFetcher:
         self._stream: Optional[StockDataStream] = None
         self._thread: Optional[threading.Thread] = None
         self._ready = threading.Event()  # set once we have at least one 15-min bar (optional for callers)
+
+    def warm_up(self):
+        """Pre-warm the buffer with the last 30 bars of 15-minute historical data."""
+        print("Pre-warming data buffer. Fetching historical bars from Alpaca...")
+
+        # Instantiate historical client
+        client = StockHistoricalDataClient(self._api_key, self._secret_key)
+
+        # Fetch last 5 days to ensure we get enough data (skipping weekends/holidays)
+        req = StockBarsRequest(symbol_or_symbols=TRAINING_TICKERS, timeframe=TimeFrame(15, TimeFrameUnit.Minute),
+                               start=datetime.now() - timedelta(days=5), feed='iex')
+
+        try:
+            bars = client.get_stock_bars(req).df
+
+            with self._lock:
+                for ticker in TRAINING_TICKERS:
+                    # Check if the ticker data exists in the multi-index dataframe
+                    if ticker in bars.index.levels[0]:
+                        # Grab the latest 30 rows (gives us a safe buffer above the required 26)
+                        ticker_df = bars.loc[ticker].tail(30)
+
+                        for timestamp, row in ticker_df.iterrows():
+                            # Format must exactly match what the live WebSocket injects
+                            self._fifteen_min_bars[ticker].append((
+                                timestamp,
+                                float(row['open']),
+                                float(row['high']),
+                                float(row['low']),
+                                float(row['close']),
+                                int(row['volume'])
+                            ))
+            print("Buffer pre-warmed successfully! Bot is ready to trade instantly.")
+        except Exception as e:
+            print(f"Error during warm-up: {e}")
 
     def _aggregate_bucket(self, symbol: str, bars: List[tuple]) -> tuple:
         """Turn a list of minute bars in one 15-min window into one 15-min bar: open=first, high=max, low=min, close=last, volume=sum."""
@@ -188,7 +227,7 @@ class IEXStream15MinFetcher:
                     columns=["Date", "Open", "High", "Low", "Close", "Volume"],
                 )
                 df.set_index("Date", inplace=True)
-                df.index = pd.to_datetime(df.index)
+                df.index = pd.to_datetime(df.index, utc=True)
                 out[symbol] = df
             if len(out) < len(TRAINING_TICKERS):
                 return None
