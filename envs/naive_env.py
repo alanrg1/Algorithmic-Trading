@@ -1,9 +1,8 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-import pandas as pd
 
-class TradingEnvGuided(gym.Env):
+class AlphaTradeEnv(gym.Env):
     metadata = {"render_modes": ["human"]}
     def __init__(self, stock_data, transaction_cost_percent=0.005):
         super().__init__()
@@ -96,68 +95,60 @@ class TradingEnvGuided(gym.Env):
         frame = np.nan_to_num(frame, nan=0.0, posinf=10.0, neginf=-10.0)
         frame = np.clip(frame, -10.0, 10.0)  # Final safety clip
         
-        return frame 
+        return frame
 
     def step(self, action):
-        self.current_step += 1  
-        
-        # Check if the episode is done (reached max steps) 
-        if self.current_step >= self.max_steps: 
-            return self._next_observation(), 0.0, True, False, {} 
-        
+        self.current_step += 1
+
+        # Check if the episode is done (reached max steps)
+        if self.current_step >= self.max_steps:
+            return self._next_observation(), 0.0, True, False, {}
+
         # Flatten action if it comes from DummyVecEnv (2D array)
         if isinstance(action, np.ndarray):
             action = action.flatten()
-        
-        current_prices = {}
-        # Loop through each ticker and perform action 
-        for i, ticker in enumerate(self.tickers): 
-            current_prices[ticker] = self.stock_data[ticker].iloc[self.current_step]['Close']
-            ticker_action = action[i] 
 
-            # Calculate cost and update balance based on selected action
+        current_prices = {}
+
+        # Calculate the maximum allowed spend per stock based on total net worth
+        max_spend_per_ticker = self.net_worth / len(self.tickers)
+
+        # Loop through each ticker and perform action
+        for i, ticker in enumerate(self.tickers):
+            current_prices[ticker] = self.stock_data[ticker].iloc[self.current_step]['Close']
+            ticker_action = action[i]
+
             if ticker_action > 0:  # Buy
-                # We want to spend a % of our balance based on the action magnitude.
-                # Hint: (Balance * Action) / Share Price
-                shares_to_buy = int(self.balance * ticker_action / current_prices[ticker])
-                
-                # Gross Cost: The raw cost of the shares without fees
+                # Attempt to spend a percentage of the Fair Share budget
+                spend_amount = max_spend_per_ticker * ticker_action
+
+                # Safety Cap: Never spend more liquid cash than you actually have
+                spend_amount = min(spend_amount, self.balance)
+
+                shares_to_buy = int(spend_amount / current_prices[ticker])
                 cost = current_prices[ticker] * shares_to_buy
-                
-                # Transaction Fee: The broker fee added on top of the cost
                 transaction_cost = cost * self.transaction_cost_percent
-                
-                # Update balance based on transaction
+
                 self.balance -= cost + transaction_cost
-                
-                # Update inventory
                 self.shares_held[ticker] += shares_to_buy
 
-            elif ticker_action < 0: # Sell 
-                # We want to sell a % of our held shares.
-                # Hint: Shares Held * abs(Action)
+            elif ticker_action < 0:  # Sell
+                # Sell a percentage of the currently held shares
                 shares_to_sell = int(self.shares_held[ticker] * abs(ticker_action))
-                
-                # Gross Revene: The raw money generated from the sale
                 sale = shares_to_sell * current_prices[ticker]
-                
-                # Transaction Fee: The broker fee taken out of the sale proceeds
                 transaction_cost = sale * self.transaction_cost_percent
-                
-                # Update balance
+
                 self.balance += sale - transaction_cost
-                
-                # Update inventory and tracking metrics
                 self.shares_held[ticker] -= shares_to_sell
                 self.total_shares_sold[ticker] += shares_to_sell
                 self.total_sales_value[ticker] += sale
 
-        # Calculate the net worth 
-        self.net_worth = self.balance + sum(self.shares_held[ticker] * current_prices[ticker] for ticker in self.tickers) 
+        # Calculate the net worth
+        self.net_worth = self.balance + sum(
+            self.shares_held[ticker] * current_prices[ticker] for ticker in self.tickers)
         self.max_net_worth = max(self.max_net_worth, self.net_worth)
 
         reward = (self.net_worth - self.initial_balance) / self.initial_balance
-        # Clip reward to prevent extreme values that can cause NaN
         reward = np.clip(reward, -10.0, 10.0)
         done = self.net_worth <= 0 or self.current_step >= self.max_steps
 
