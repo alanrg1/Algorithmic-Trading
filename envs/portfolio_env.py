@@ -8,7 +8,7 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Tuple
 
 from src.alpha_portfolio import AlphaPortfolio
 
@@ -149,7 +149,7 @@ class PortfolioEnv(AlphaPortfolio, gym.Env):
         4. Compute reward
         """
         # =================================================================
-        # TODO 1: Implement the step sequence
+        # Implement the step sequence
         # =================================================================
         # 1. Convert action to target weights
         target_weights = self.softmax(action)
@@ -170,8 +170,8 @@ class PortfolioEnv(AlphaPortfolio, gym.Env):
         self.update(returns)
         
         # 6. Compute reward and check bankruptcy
-        reward = None  # TODO
-        terminated = None  # TODO
+        reward = self._compute_reward()
+        terminated = self._value <= 0
         
         return self._get_obs(), reward, terminated, False, self._get_info()
     
@@ -212,25 +212,43 @@ class PortfolioEnv(AlphaPortfolio, gym.Env):
         obs = np.nan_to_num(obs, nan=0.0, posinf=10.0, neginf=-10.0)
         
         return obs.astype(np.float32)
-    
+
     def _compute_reward(self) -> float:
         """Compute reward based on reward_type."""
         if len(self._returns_history) < 2:
             return 0.0
-        
-        # =================================================================
-        # TODO 2: Implement reward computation
-        # Use self.reward_type to select the branch
-        # =================================================================
+
+        # Get the actual portfolio return for the current step
+        step_return = self._returns_history[-1]
+
+        # Calculate the rolling volatility (standard deviation of recent returns)
+        # Add a small epsilon (1e-6) to prevent division by zero if the AI holds 100% cash
+        recent_returns = np.array(self._returns_history[-self._cov_window:])
+        volatility = np.std(recent_returns) + 1e-6
+
         if self.reward_type == "sharpe":
-            reward = None  # TODO
+            # Real Sharpe = Return / Volatility
+            reward = step_return / volatility
+        elif self.reward_type == "sortino":
+            # Real Sortino = Return / Downside Volatility
+            downside_returns = recent_returns[recent_returns < 0]
+            downside_vol = np.std(downside_returns) + 1e-6 if len(downside_returns) > 0 else 1e-6
+            reward = step_return / downside_vol
         elif self.reward_type == "return":
-            reward = None  # TODO
+            # Pure profit motive
+            reward = step_return * 100
         else:
-            reward = self._returns_history[-1] * 100
-        
+            reward = step_return * 100
+
+        # --- THE ANTI-CASH PENALTY ---
+        # If the AI holds more than 50% in cash, penalize the reward.
+        # This forces it to actually invest in the market to find Alpha.
+        cash_weight = self._weights[-1]  # Assuming cash is the last index in the weights array
+        if cash_weight > 0.50:
+            reward -= 0.1 * cash_weight  # Slight penalty for cowardice
+
         return float(np.clip(reward, -10.0, 10.0))
-    
+
     def _get_info(self) -> dict:
         """Get info dict."""
         info = {
@@ -301,7 +319,7 @@ class PortfolioEnvWithBaselines(PortfolioEnv):
         obs, reward, terminated, truncated, info = super().step(action)
         
         # Update baselines
-        if self.current_step > 0 and self.current_step < len(self.returns_matrix):
+        if 0 < self.current_step < len(self.returns_matrix):
             returns = self.returns_matrix[self.current_step]
             prices = self.price_matrix[self.current_step]
             

@@ -1,7 +1,5 @@
 import numpy as np 
-import pandas as pd 
-from typing import Dict, Optional, List
-from abc import ABC 
+from typing import Optional, List
 
 class AlphaPortfolio: 
     def __init__(
@@ -119,21 +117,19 @@ class AlphaPortfolio:
             Portfolio return for the period
         """ 
         # =====================================================================
-        # TODO 1: Compute portfolio return and update state
+        # Compute portfolio return and update state
         # (Week 6 slide 4: portfolio return is the weighted sum)
         # =====================================================================
         if self.include_cash: 
-            assest_returns = np.concatenate([returns, [0.0]]) 
-        else: 
-            assest_returns = returns 
+            asset_returns = np.concatenate([returns, [0.0]])
+        else:
+            asset_returns = returns
 
-        portfolio_return = None  # TODO
-
-        self._value *= None  # TODO
-
+        portfolio_return = np.dot(self._weights, asset_returns)
+        self._value *= (1 + portfolio_return)
         self._returns_history.append(portfolio_return)
         self._value_history.append(self._value)
-        self._returns_buffer.append(assest_returns) 
+        self._returns_buffer.append(asset_returns)
 
         if len(self._returns_buffer) > self._cov_window * 2:
             self._returns_buffer = self._returns_buffer[-self._cov_window * 2 :]
@@ -169,13 +165,13 @@ class AlphaPortfolio:
             Valid weights summing to 1
         """ 
         # =====================================================================
-        # TODO 2: Implement numerically stable softmax
+        # Implement numerically stable softmax
         # Hint: softmax(x)_i = exp(x_i) / Σ_j exp(x_j)
         # =====================================================================
         x = np.asarray(x).flatten() / temperature 
         x = x - np.max(x)  # numerical stability
-        exp_x = None  # TODO
-        return None  # TODO
+        exp_x = np.exp(x)
+        return exp_x / (np.sum(exp_x) + 1e-8)
     
     def total_return(self) -> float:
         """Total return since inception (percentage)."""
@@ -210,9 +206,9 @@ class AlphaPortfolio:
             Sharpe ratio
         """
         # =====================================================================
-        # TODO 3: Implement the Sharpe ratio
+        # Implement the Sharpe ratio
         # Formula (Week 6 slide 15):
-        #   Sharpe = (Expected Return - Risk-Free Rate) / Standard Deviation
+        # Sharpe = (Expected Return - Risk-Free Rate) / Standard Deviation
         # =====================================================================
         mean = self.mean_return(annualize=annualize)
         std = self.std_return(annualize=annualize)
@@ -220,8 +216,8 @@ class AlphaPortfolio:
         if std < 1e-8:
             return 0.0
         
-        rf = None  # TODO
-        return None  # TODO
+        rf = self.risk_free_rate if annualize else self.risk_free_rate / 252
+        return (mean- rf) / std
     
     def sortino_ratio(self, target: float = 0.0) -> float:
         """
@@ -328,7 +324,7 @@ class AlphaPortfolio:
         window = window or self._cov_window
         
         # =====================================================================
-        # TODO 4: Compute the rolling covariance matrix
+        # Compute the rolling covariance matrix
         # Week 6 slides 6-7: Σ captures how assets move together.
         # Diagonal = variance, off-diagonal = covariance.
         # =====================================================================
@@ -344,7 +340,7 @@ class AlphaPortfolio:
         if self.include_cash and returns.shape[1] > self.n_assets:
             returns = returns[:, :self.n_assets]
         
-        cov = None  # TODO
+        cov = np.cov(returns.T)
         
         if cov.ndim == 0:
             cov = np.array([[cov]])
@@ -413,14 +409,14 @@ class AlphaPortfolio:
         ones = np.ones(n)
         
         # =====================================================================
-        # TODO 5: Compute minimum variance portfolio weights
+        # Compute minimum variance portfolio weights
         # Week 6 slide 11 — closed-form:
         #   w* = Σ^{-1} / (1^T Σ^{-1} 1)
         # =====================================================================
         try:
             cov_reg = cov_matrix + np.eye(n) * 1e-6
             inv_cov = np.linalg.inv(cov_reg)
-            stock_weights = None  # TODO
+            stock_weights = inv_cov @ ones / (ones @ inv_cov @ ones)
             
             # Long-only constraint: clamp negatives to 0, re-normalize
             stock_weights = np.maximum(stock_weights, 0)
@@ -462,7 +458,7 @@ class AlphaPortfolio:
         n = cov_matrix.shape[0]
         
         # =====================================================================
-        # TODO 6: Compute maximum Sharpe (tangency) portfolio weights
+        # Compute maximum Sharpe (tangency) portfolio weights
         # Week 6 slides 19-20 — closed-form:
         #   w* = Σ^{-1} (μ - R_f) / (1^T Σ^{-1} (μ - R_f))
         # =====================================================================
@@ -471,7 +467,7 @@ class AlphaPortfolio:
         try:
             cov_reg = cov_matrix + np.eye(n) * 1e-6
             inv_cov = np.linalg.inv(cov_reg)
-            stock_weights = None  # TODO
+            stock_weights = inv_cov @ excess
             
             # Long-only constraint: clamp negatives to 0, re-normalize
             stock_weights = np.maximum(stock_weights, 0)
