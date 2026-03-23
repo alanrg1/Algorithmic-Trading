@@ -1,1 +1,1 @@
-from .naive_env import TradingEnvGuided
+from .naive_env import AlphaTradeEnv
